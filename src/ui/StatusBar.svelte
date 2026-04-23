@@ -9,16 +9,17 @@
   export let count = 0;
 
   let now = Date.now();
-  const tick = setInterval(() => { now = Date.now(); }, 1000);
+  const tick = setInterval(() => { now = Date.now(); }, 10_000);
   onDestroy(() => clearInterval(tick));
 
-  function ago(ts) {
+  $: agoText = (() => {
+    const ts = lastUpdate[activeBucket];
     if (!ts) return '—';
     const secs = Math.floor((now - ts) / 1000);
     if (secs < 60)  return `${secs}s ago`;
     if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
     return `${Math.floor(secs / 3600)}h ago`;
-  }
+  })();
 
   $: status = conn[activeBucket] ?? 'connecting';
 </script>
@@ -27,7 +28,7 @@
   <span class="dot {status}" title={status}></span>
   <span class="bucket-label">{activeBucket}</span>
   <span class="count">{count} arb{count !== 1 ? 's' : ''}</span>
-  <span class="updated">updated {ago(lastUpdate[activeBucket])}</span>
+  <span class="updated">updated {agoText}</span>
 </div>
 
 <style>
