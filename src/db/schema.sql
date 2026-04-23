@@ -1,0 +1,43 @@
+CREATE TABLE IF NOT EXISTS arb_opportunities (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id              INTEGER NOT NULL,
+    source_type           TEXT NOT NULL,
+    market_type           TEXT NOT NULL,
+    target_date           TEXT NOT NULL,
+    start_time            TEXT NOT NULL,
+    canonical_home        TEXT NOT NULL,
+    canonical_away        TEXT NOT NULL,
+    competition           TEXT,
+    country               TEXT,
+    confidence            TEXT,
+    n_legs                INTEGER NOT NULL,
+    leg_signature         TEXT NOT NULL,
+    inverse_odds_sum      REAL NOT NULL,
+    profit_margin_bps     INTEGER NOT NULL,
+    total_stake           REAL NOT NULL,
+    guaranteed_return     REAL NOT NULL,
+    guaranteed_profit     REAL NOT NULL,
+    oldest_odd_updated_at TEXT NOT NULL,
+    latest_odd_updated_at TEXT NOT NULL,
+    first_seen_at         TEXT NOT NULL,
+    last_seen_at          TEXT NOT NULL,
+    last_run_id           INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS arb_legs (
+    opportunity_id     INTEGER NOT NULL,
+    leg_index          INTEGER NOT NULL,
+    bookmaker          TEXT NOT NULL,
+    outcome            TEXT NOT NULL,
+    odd                REAL NOT NULL,
+    stake              REAL NOT NULL,
+    expected_return    REAL NOT NULL,
+    event_id           INTEGER NOT NULL,
+    bookmaker_event_id TEXT,
+    fetch_url          TEXT,
+    event_active       TEXT,
+    odd_updated_at     TEXT NOT NULL,
+    event_updated_at   TEXT,
+    PRIMARY KEY (opportunity_id, leg_index),
+    FOREIGN KEY (opportunity_id) REFERENCES arb_opportunities(id) ON DELETE CASCADE
+);
