@@ -49,7 +49,12 @@
   onMount(() => {
     applyTheme();
     for (const b of BUCKETS) {
-      boot(b, (db) => onUpdate(b, db)).catch((err) => {
+      boot(b, (db) => onUpdate(b, db), {
+        onError: () => { conn = { ...conn, [b]: 'error' }; },
+        onOpen:  () => {
+          if (conn[b] === 'error') conn = { ...conn, [b]: 'connecting' };
+        },
+      }).catch((err) => {
         console.error(`[App] boot failed for ${b}:`, err);
         conn = { ...conn, [b]: 'error' };
       });

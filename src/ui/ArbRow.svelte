@@ -1,13 +1,30 @@
 <script>
+  import { nowMs } from './time.js';
+  import { EXPIRY_LIVE_S, EXPIRY_UPCOMING_S } from '@sync/protocol.js';
+
   export let arb;
   export let expired = false;
 
   $: margin = (arb.profit_margin_bps / 100).toFixed(2);
 
+  const EXPIRY_S = { live: EXPIRY_LIVE_S, upcoming: EXPIRY_UPCOMING_S };
+
   function fmtTime(s) {
     if (!s) return '—';
     const [, , day, hm] = s.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/) ?? [];
     return day && hm ? `${day} ${hm}` : s;
+  }
+
+  // Extract HH:MM:SS from an ISO 8601 or "YYYY-MM-DD HH:MM:SS" timestamp.
+  // Timestamps are stored in EAT (+03:00) so the time component is directly readable.
+  function fmtHms(ts) {
+    if (!ts) return '—';
+    // "2024-05-10T07:35:42+03:00" → "07:35:42"
+    const mT = ts.match(/T(\d{2}:\d{2}:\d{2})/);
+    if (mT) return mT[1];
+    // "2024-05-10 07:35:42" → "07:35:42"
+    const mS = ts.match(/ (\d{2}:\d{2}:\d{2})/);
+    return mS ? mS[1] : ts;
   }
 
   function fmtOdd(v)   { return Number(v).toFixed(2); }
@@ -21,6 +38,38 @@
     if (secs < 3600) return `expired ${Math.floor(secs / 60)}m ago`;
     return `expired ${Math.floor(secs / 3600)}h ago`;
   }
+
+  // For live arbs: count down to zero — meaningful because the 10 s threshold
+  // means the countdown races to zero if the scanner misses two passes.
+  // For upcoming arbs: "expires in ~10m" is always ~10m because the scanner
+  // refreshes last_seen_at every 5 s → show "seen X ago" instead, which
+  // actually decreases between scanner passes and resets clearly on each upsert.
+  $: seenAgoSecs = (() => {
+    const lastMs = arb.last_seen_at ? Date.parse(arb.last_seen_at) : null;
+    if (!lastMs) return null;
+    return Math.floor(($nowMs - lastMs) / 1000);
+  })();
+
+  $: seenAgoText = (() => {
+    if (seenAgoSecs === null) return '—';
+    if (seenAgoSecs < 60) return `${seenAgoSecs}s ago`;
+    return `${Math.floor(seenAgoSecs / 60)}m ${seenAgoSecs % 60}s ago`;
+  })();
+
+  $: expiresInSecs = (() => {
+    if (expired || arb.source_type !== 'live') return null;
+    const lastMs = arb.last_seen_at ? Date.parse(arb.last_seen_at) : null;
+    if (!lastMs) return null;
+    return Math.floor((lastMs + EXPIRY_LIVE_S * 1000 - $nowMs) / 1000);
+  })();
+
+  $: expiresText = (() => {
+    if (expiresInSecs === null) return null;
+    if (expiresInSecs <= 0) return 'expiring…';
+    return `${Math.max(0, expiresInSecs)}s`;
+  })();
+
+  $: isUrgent = expiresInSecs !== null && expiresInSecs <= 5;
 </script>
 
 <div
@@ -72,6 +121,28 @@
     <span>return <strong>{arb.guaranteed_return.toFixed(2)}</strong></span>
     <span>profit <strong>{arb.guaranteed_profit.toFixed(2)}</strong></span>
   </div>
+
+  <!-- Freshness row -->
+  {#if !expired}
+    <div class="freshness">
+      <span class="ts" title="oldest bookmaker odd at {fmtHms(arb.oldest_odd_updated_at)}">
+        odds {fmtHms(arb.oldest_odd_updated_at)}
+      </span>
+      {#if arb.source_type === 'live'}
+        <!-- Live: countdown to expiry is meaningful (10 s threshold) -->
+        <span class="ts">seen {fmtHms(arb.last_seen_at)}</span>
+        {#if expiresText !== null}
+          <span class="expires" class:urgent={isUrgent}>expires {expiresText}</span>
+        {/if}
+      {:else}
+        <!-- Upcoming: scanner refreshes every 5 s so "expires in ~10m" is always
+             ~10m — show "seen X ago" which resets clearly on each upsert -->
+        <span class="ts seen-ago" class:stale={seenAgoSecs !== null && seenAgoSecs > 30}>
+          seen {seenAgoText}
+        </span>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -222,4 +293,35 @@
   }
 
   .footer strong { color: var(--text-secondary, #64748b); }
+
+  /* ── Freshness row ── */
+  .freshness {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 0.68rem;
+    color: var(--text-tertiary, #94a3b8);
+    border-top: 1px dashed var(--border, #e2e8f0);
+    padding-top: 4px;
+  }
+
+  .ts { font-variant-numeric: tabular-nums; }
+  .seen-ago.stale { color: var(--color-warning, #f59e0b); }
+
+  .expires {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-success, #22c55e);
+  }
+
+  .expires.urgent {
+    color: var(--color-error, #ef4444);
+    font-weight: 700;
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+  }
 </style>

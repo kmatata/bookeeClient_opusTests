@@ -24,7 +24,7 @@ export async function fetchSnapshot(bucket) {
  * @param {number}   cursor
  * @param {object}   handlers  { onUpsert, onDelete, onStale }
  */
-export function openStream(bucket, cursor, { onUpsert, onDelete, onStale }) {
+export function openStream(bucket, cursor, { onUpsert, onDelete, onStale, onError, onOpen }) {
   const es = new EventSource(`/stream/${bucket}?cursor=${cursor}`);
 
   es.addEventListener('upsert', (e) => onUpsert(JSON.parse(e.data)));
@@ -34,7 +34,13 @@ export function openStream(bucket, cursor, { onUpsert, onDelete, onStale }) {
     onStale(JSON.parse(e.data));
   });
 
-  es.onerror = (e) => console.warn('[sse] connection error', e);
+  es.onerror = (e) => {
+    console.warn(`[sse:${bucket}] connection error`, e);
+    if (onError) onError();
+  };
+  es.onopen = () => {
+    if (onOpen) onOpen();
+  };
 
   return es;
 }

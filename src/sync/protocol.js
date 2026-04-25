@@ -2,14 +2,20 @@ import { createSQLiteAPI } from '../db/init.js';
 import { detectVFS, openDB } from './storage.js';
 import { fetchSnapshot, openStream } from './api.js';
 
-// Client-side expiry mirrors the backend arb_view thresholds exactly.
+// Client-side expiry mirrors the backend arb_view thresholds.
+// Staleness is driven purely by last_seen_at — the arbitrage scanner
+// (--loop 5) updates it every 5 s while the arb is alive.
+//   EXPIRY_LIVE_S = 10:  live arbs expire after two missed scanner passes.
+//   EXPIRY_UPCOMING_S = 600: upcoming arbs get a 10-minute window (one
+//     missed extractor cycle) before being considered gone.
 // start_time is NOT used for expiry — the ETL schema explicitly documents
 // that it is only a fixture context field (denormalized from the matcher).
-// Bookmakers stop quoting upcoming odds once a match kicks off, so the
-// scanner naturally stops seeing the arb and last_seen_at goes stale.
 //
 // Expired rows are soft-deleted: expired_at is set and the row moves to
 // the UI's expired section for 3 hours before hard-deletion.
+export const EXPIRY_LIVE_S     = 10;
+export const EXPIRY_UPCOMING_S = 600;
+
 export function runExpiryCleanup(db) {
   try {
     // Mark newly stale rows as expired (only those not already expired)
@@ -18,10 +24,10 @@ export function runExpiryCleanup(db) {
       SET expired_at = datetime('now')
       WHERE expired_at IS NULL AND (
         (source_type = 'live'
-          AND (unixepoch('now') - unixepoch(last_seen_at)) > 10)
+          AND (unixepoch('now') - unixepoch(last_seen_at)) > ${EXPIRY_LIVE_S})
         OR
         (source_type = 'upcoming'
-          AND (unixepoch('now') - unixepoch(last_seen_at)) > 600)
+          AND (unixepoch('now') - unixepoch(last_seen_at)) > ${EXPIRY_UPCOMING_S})
       )
     `);
     const newlyExpired = db.changes();
@@ -68,7 +74,10 @@ export function applyUpsert(db, opp) {
       opp.country           ?? null,
       opp.confidence        ?? null,
       opp.n_legs,
-      opp.leg_signature     ?? null,
+      // leg_signature is not in arb_view / SSE payload — derive it the same
+      // way the ETL does: sorted "bookmaker:outcome|..." string.
+      opp.leg_signature
+        ?? opp.legs.map(l => `${l.bookmaker}:${l.outcome}`).sort().join('|'),
       opp.inverse_odds_sum  ?? null,
       opp.profit_margin_bps,
       opp.total_stake,
@@ -109,7 +118,13 @@ export function applyUpsert(db, opp) {
 }
 
 export function applyDelete(db, opportunityId) {
-  db.exec('DELETE FROM arb_opportunities WHERE id = ?', [opportunityId]);
+  // Soft-expire rather than hard-delete: the row moves to the expired section
+  // for 3 hours so users can see arbs that just disappeared from the market.
+  // Hard deletion is handled by runExpiryCleanup after the 3-hour window.
+  db.exec(
+    `UPDATE arb_opportunities SET expired_at = datetime('now') WHERE id = ? AND expired_at IS NULL`,
+    [opportunityId],
+  );
 }
 
 /**
@@ -121,11 +136,12 @@ export function applyDelete(db, opportunityId) {
  * 4. On snapshot_stale: re-fetch snapshot, re-deserialize, reconnect SSE.
  * 5. Expiry cleanup runs on a 5-second interval for the lifetime of the page.
  *
- * @param {string}   bucket   'low' | 'mid' | 'high' | 'moon'
- * @param {Function} onUpdate called with (db) after every state change
+ * @param {string}   bucket     'low' | 'mid' | 'high' | 'moon'
+ * @param {Function} onUpdate   called with (db) after every state change
+ * @param {object}   [opts]     { onError, onOpen } for SSE connection state
  * @returns {Promise<object>} the db wrapper (for callers that need direct access)
  */
-export async function boot(bucket, onUpdate) {
+export async function boot(bucket, onUpdate, { onError, onOpen } = {}) {
   const sqlite3 = await createSQLiteAPI();
   const vfs = detectVFS(sqlite3);
   const db = openDB(sqlite3, `arb_${bucket}.db`, vfs);
@@ -163,6 +179,8 @@ export async function boot(bucket, onUpdate) {
         console.warn(`[sse:${bucket}] snapshot_stale`, reason);
         connect().catch((err) => console.error(`[boot:${bucket}] reconnect failed`, err));
       },
+      onError,
+      onOpen,
     });
 
     console.info(`[boot:${bucket}] SSE stream open (cursor=${cursor})`);
