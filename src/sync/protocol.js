@@ -3,28 +3,40 @@ import { detectVFS, openDB } from './storage.js';
 import { fetchSnapshot, openStream } from './api.js';
 
 // Client-side expiry mirrors the backend arb_view thresholds.
-// Staleness is driven purely by last_seen_at — the arbitrage scanner
-// (--loop 5) updates it every 5 s while the arb is alive.
-//   EXPIRY_LIVE_S = 10:  live arbs expire after two missed scanner passes.
-//   EXPIRY_UPCOMING_S = 600: upcoming arbs get a 10-minute window (one
-//     missed extractor cycle) before being considered gone.
-// start_time is NOT used for expiry — the ETL schema explicitly documents
-// that it is only a fixture context field (denormalized from the matcher).
 //
-// Expired rows are soft-deleted: expired_at is set and the row moves to
-// the UI's expired section for 3 hours before hard-deletion.
-export const EXPIRY_LIVE_S     = 10;
+// Live arbs are gated on oldest_odd_updated_at (actual bookie fetch time)
+// rather than last_seen_at (scanner heartbeat).  The scanner runs every
+// 5 s and used to keep refreshing last_seen_at even when the underlying
+// bookie data was 60 s old, so arbs never looked stale after real odds
+// moved.  The 120 s window covers one full 60 s extractor cycle plus a
+// 60 s grace period for matcher lag.
+//
+// Upcoming arbs continue to use last_seen_at because the extractor cycle
+// is 600 s — last_seen_at is a reasonable proxy for "has the arb vanished
+// from the matched view?"
+//
+// EXPIRED: live fixtures whose start_time is more than 2.5 hours ago are
+// considered finished.  start_time is naive EAT text; we convert it to UTC
+// (subtract 3 hours) and compare against now minus 2.5 hours:
+//   datetime(start_time, '-3 hours') < datetime('now', '-150 minutes')
+//
+// Soft-deleted rows move to the UI's expired section for 3 hours before
+// hard-deletion.
+export const EXPIRY_LIVE_S     = 120;
 export const EXPIRY_UPCOMING_S = 600;
 
 export function runExpiryCleanup(db) {
   try {
-    // Mark newly stale rows as expired (only those not already expired)
+    // Mark newly stale / expired rows (only those not already expired)
     db.exec(`
       UPDATE arb_opportunities
       SET expired_at = datetime('now')
       WHERE expired_at IS NULL AND (
         (source_type = 'live'
-          AND (unixepoch('now') - unixepoch(last_seen_at)) > ${EXPIRY_LIVE_S})
+          AND (
+            datetime(start_time, '-3 hours') < datetime('now', '-150 minutes')
+            OR (unixepoch('now') - unixepoch(oldest_odd_updated_at)) > ${EXPIRY_LIVE_S}
+          ))
         OR
         (source_type = 'upcoming'
           AND (unixepoch('now') - unixepoch(last_seen_at)) > ${EXPIRY_UPCOMING_S})
