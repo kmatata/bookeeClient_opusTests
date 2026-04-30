@@ -4,16 +4,17 @@ import { fetchSnapshot, openStream } from './api.js';
 
 // Client-side expiry mirrors the backend arb_view thresholds.
 //
-// Live arbs are gated on oldest_odd_updated_at (actual bookie fetch time)
-// rather than last_seen_at (scanner heartbeat).  The scanner runs every
-// 5 s and used to keep refreshing last_seen_at even when the underlying
-// bookie data was 60 s old, so arbs never looked stale after real odds
-// moved.  The 120 s window covers one full 60 s extractor cycle plus a
-// 60 s grace period for matcher lag.
+// Live arbs use a *hybrid* check:
+// 1. oldest_odd_updated_at > 45 s  → underlying bookie data is stale
+// 2. last_seen_at          > 15 s  → arb disappeared from matched view
 //
-// Upcoming arbs continue to use last_seen_at because the extractor cycle
-// is 600 s — last_seen_at is a reasonable proxy for "has the arb vanished
-// from the matched view?"
+// The 45 s window covers one full 30 s extractor cycle (reduced from 60 s)
+// plus a 15 s grace period for matcher + scanner lag.
+// The 15 s disappearance window catches arbs whose odds moved out of arb
+// territory — the scanner stops detecting them and they go stale fast.
+//
+// Upcoming arbs continue to use last_seen_at (600 s) because the extractor
+// cycle is still 600 s.
 //
 // EXPIRED: live fixtures whose start_time is more than 2.5 hours ago are
 // considered finished.  start_time is naive EAT text; we convert it to UTC
@@ -22,8 +23,9 @@ import { fetchSnapshot, openStream } from './api.js';
 //
 // Soft-deleted rows move to the UI's expired section for 3 hours before
 // hard-deletion.
-export const EXPIRY_LIVE_S     = 120;
-export const EXPIRY_UPCOMING_S = 600;
+export const EXPIRY_LIVE_S            = 45;
+export const EXPIRY_LAST_SEEN_LIVE_S  = 15;
+export const EXPIRY_UPCOMING_S        = 600;
 
 export function runExpiryCleanup(db) {
   try {
@@ -36,6 +38,7 @@ export function runExpiryCleanup(db) {
           AND (
             datetime(start_time, '-3 hours') < datetime('now', '-150 minutes')
             OR (unixepoch('now') - unixepoch(oldest_odd_updated_at)) > ${EXPIRY_LIVE_S}
+            OR (unixepoch('now') - unixepoch(last_seen_at)) > ${EXPIRY_LAST_SEEN_LIVE_S}
           ))
         OR
         (source_type = 'upcoming'
