@@ -1,6 +1,6 @@
 <script>
   import { nowMs } from './time.js';
-  import { EXPIRY_LIVE_S, EXPIRY_UPCOMING_S } from '@sync/protocol.js';
+  import { EXPIRY_LIVE_S, EXPIRY_LAST_SEEN_LIVE_S, EXPIRY_UPCOMING_S } from '@sync/protocol.js';
 
   export let arb;
   export let expired = false;
@@ -39,8 +39,8 @@
     return `expired ${Math.floor(secs / 3600)}h ago`;
   }
 
-  // For live arbs: count down to zero — meaningful because the 10 s threshold
-  // means the countdown races to zero if the scanner misses two passes.
+  // For live arbs: count down to zero — meaningful because the 15 s disappearance
+  // window means the countdown races to zero if the scanner stops detecting the arb.
   // For upcoming arbs: "expires in ~10m" is always ~10m because the scanner
   // refreshes last_seen_at every 5 s → show "seen X ago" instead, which
   // actually decreases between scanner passes and resets clearly on each upsert.
@@ -59,8 +59,14 @@
   $: expiresInSecs = (() => {
     if (expired || arb.source_type !== 'live') return null;
     const lastMs = arb.last_seen_at ? Date.parse(arb.last_seen_at) : null;
-    if (!lastMs) return null;
-    return Math.floor((lastMs + EXPIRY_LIVE_S * 1000 - $nowMs) / 1000);
+    const oddMs = arb.oldest_odd_updated_at ? Date.parse(arb.oldest_odd_updated_at) : null;
+    if (!lastMs || !oddMs) return null;
+    // Live expiry is whichever window hits first:
+    //   - data freshness:  oldest_odd_updated_at + 45 s
+    //   - disappearance:   last_seen_at + 15 s
+    const lastSeenExpiry = lastMs + EXPIRY_LAST_SEEN_LIVE_S * 1000;
+    const oddExpiry = oddMs + EXPIRY_LIVE_S * 1000;
+    return Math.floor((Math.min(lastSeenExpiry, oddExpiry) - $nowMs) / 1000);
   })();
 
   $: expiresText = (() => {
@@ -129,7 +135,7 @@
         odds {fmtHms(arb.oldest_odd_updated_at)}
       </span>
       {#if arb.source_type === 'live'}
-        <!-- Live: countdown to expiry is meaningful (10 s threshold) -->
+        <!-- Live: countdown to earliest of 45 s (odd age) or 15 s (disappearance) -->
         <span class="ts">seen {fmtHms(arb.last_seen_at)}</span>
         {#if expiresText !== null}
           <span class="expires" class:urgent={isUrgent}>expires {expiresText}</span>
